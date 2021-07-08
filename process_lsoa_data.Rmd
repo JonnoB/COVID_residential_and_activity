@@ -1,0 +1,153 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+This file is designed to do the Loading and processing of the data to be used in this project
+
+The file is broken into 3 parts the setup which defines all the packages used and file paths, The residential features,
+the activity features.
+
+
+#Setup
+
+
+```{r}
+
+packages <- c("readxl", "readr", "tidyverse")
+
+new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+sapply(packages, library, character.only = TRUE)
+
+base_folder <- file.path("/home/jonno", "COVID_project")
+data_folder <- file.path(base_folder, "COVID_project_data")
+
+list.files(data_folder)
+```
+
+
+
+#Residential features
+
+##Age
+
+This chunk get the age of the residents of an LSOA, breaking them into above and below 60. The data comes from the ONS and is called "Lower layer Super Output Area population estimates (supporting information)" it can be found at https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/datasets/lowersuperoutputareamidyearpopulationestimates
+
+NOTE: this data includes only England and Wales
+
+```{r}
+
+
+#load data and make lower case headings with spaces as periods
+raw_data <- read_excel(file.path(path = data_folder,"SAPE22DT2-mid-2019-lsoa-syoa-estimates-unformatted.xlsx"), 
+                   sheet = "Mid-2019 Persons",
+                   skip =3,
+                   .name_repair = "universal")  %>%
+  set_names(., nm = tolower(names(.)))
+
+
+#which lsoa standard are we going to use? 2011 or 2019?
+#this code currently uses 2011
+
+age_df <- raw_data %>%
+  rowwise(lsoa.code) %>%
+    #first select the rows that are numbers, then sum them row wise
+  mutate(younger =  c_across(num_range(prefix = "...", range = 0:59)) %>% sum(),
+         older =  c_across(c(num_range(prefix = "...", range = 90:100), "..90.")) %>% sum()) %>%
+  ungroup %>%
+  select(lsoa.code, younger, older) %>%
+  mutate(total = younger+older,
+         fract_older = older/total)
+  
+
+```
+
+
+##Air pollution
+
+This data set comes from  "Access to Healthy Assets & Hazards (AHAH)" produced by the CDRC, available at https://data.cdrc.ac.uk/dataset/access-healthy-assets-hazards-ahah
+
+There are two different datasets available, one represents the indecies whilt the other the input data. I have for now chosen to use input data and take only PM10 as the airquality indicator. This can be changed
+
+meta data describing the headers is also available from the same place.
+
+
+```{r}
+
+air_pollution_df <- read_csv(file.path(data_folder, "allvariableslsoawdeciles.csv"  )) %>%
+  select(lsoa11, pm10_mean)
+
+#The index files
+#test <- read_csv(file.path(data_folder, "ahahv2domainsindex.csv"))
+```
+
+
+##Deprivation
+
+The deprivation data comes from the ONS and is available from https://www.gov.uk/government/statistics/english-indices-of-deprivation-2019
+
+lower scores are MORE deprived, higher scores are LESS deprived
+
+NOTE: this data includes only England
+
+```{r}
+deprivation_df <- read_excel(file.path(data_folder, "File_1_-_IMD2019_Index_of_Multiple_Deprivation.xlsx"),  
+                             sheet = "IMD2019",
+                   .name_repair = "universal")  %>%
+  set_names(., nm = tolower(names(.))) %>%
+  select(lsoa.code = "lsoa.code..2011.", imd_rank = "index.of.multiple.deprivation..imd..rank")
+
+
+```
+
+
+##Ethnicity
+
+I have applied for access to the CDRC ethnicity estimates dataset. Information on this dataset can be found here https://data.cdrc.ac.uk/dataset/cdrc-modelled-ethnicity-proportions-lsoa-geography
+
+This dataset is more upto date than the census and includes a somewhat reduced number of ethnicities than the census. 
+
+```{r}
+
+```
+
+
+
+##Merge datasets
+
+This chunk simply merges the different datasets to produce a single dataset of very limited number of variables to use as the residential LSOA features.
+
+
+The resulting dataset includes only complete cases, as such it is only the data for England.
+
+```{r}
+
+residential_lsoa_df <- age_df %>%
+  select(lsoa.code, fract_older) %>%
+  left_join(., air_pollution_df, by = c("lsoa.code" ="lsoa11") ) %>%
+  left_join(., deprivation_df, by = c("lsoa.code" )) %>%
+  filter(complete.cases(.))
+
+```
+
+
+#Activity features
+
+This section loads the data that will be used as the activity or functional features of the data set to determin what sort of activities are taking place when they are the destination of someone travelling there from there home LSOA.
+
+Although we have discussed using the method created by the Cambridge team the CDRC have made produced a freely available dataset for the entire country that has a substantial amount of useful information in it. Due to it's availablibity this may be a better starting point than trying to re-create the Doc2Vec method.
+
+The CRDC dataset is called "Classification of Multidimensional Open Data of Urban Morphology (MODUM)" and is available from "https://data.cdrc.ac.uk/dataset/classification-multidimensional-open-data-urban-morphology-modum".
+
+The data is at OA level and so would need to be aggregated to LSOA level. However, depending on the granularity of the data we get from Alexi we could also use it at OA level.
+
+
+
+```{r}
+
+```
+
