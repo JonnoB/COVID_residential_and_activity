@@ -1,0 +1,319 @@
+---
+title: "Untitled"
+author: "Jonathan Bourne"
+date: "28/07/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+#  Setup
+
+
+```{r, echo = FALSE}
+
+packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne")
+
+new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+sapply(packages, library, character.only = TRUE)
+
+library(ukcovid19)
+
+base_folder <- file.path("/home/jonno", "COVID_project")
+data_folder <- file.path(base_folder, "COVID_project_data")
+
+#list.files(data_folder)
+```
+
+create some useful functions
+
+```{r, results='hide',echo = FALSE}
+create_cor <- function(covid_msoa_time, target_var, use = "everything", method ="kendall"){
+  
+  cor_mat <-covid_msoa_time %>%
+select(msoa.code, date, {{target_var}}) %>%
+  pivot_wider(., values_from = {{target_var}}, names_from = msoa.code) %>%
+  select(-date) %>%
+  cor(., use = use, method = method)
+
+
+percentiles_df <- as_tibble(cor_mat) %>% mutate(name1 = rownames(cor_mat)) %>% 
+  pivot_longer(cols = -name1, names_to = "name2") %>%
+  filter(name1!=name2) %>%
+  mutate(percentile = percent_rank(value))
+  
+list(cor_mat = cor_mat, percentiles = percentiles_df)
+}
+
+```
+
+
+load lsoa msoa lookup data
+
+```{r, results='hide',echo = FALSE}
+geog_lookup <- read_csv(file.path(data_folder, "Output_Area_to_LSOA_to_MSOA_to_Local_Authority_District_(December_2017)_Lookup_with_Area_Classifications_in_Great_Britain.csv")) %>%
+  filter(RGN11NM == "London") %>%
+  rename(msoa.code = MSOA11CD)
+{
+msoa_class <- geog_lookup %>%
+  group_by(SOAC11CD, SOAC11NM, msoa.code) %>%
+  summarise(counts = n()) %>%
+  group_by(msoa.code) %>%
+  mutate(fract = counts/sum(counts)) %>%
+  arrange(-fract) %>%
+  slice(1) %>%
+  ungroup %>%
+  mutate(class2 = ifelse(fract<.5, "mixed type", SOAC11NM)) 
+
+msoa_class <- msoa_class %>%
+  left_join(., msoa_class %>%
+  group_by(class2) %>%
+  summarise(class_counts = n())) %>%
+  mutate(class3 = ifelse(class_counts <30, "other", class2))
+
+}
+
+#uses the CRDC loac classifications for London residence types
+{
+loac_df <- read_csv(file.path(data_folder, "LOAC_Lookup.csv")) %>%
+  left_join(tibble(supgrp_cd = LETTERS[1:8], supgrp_name = c("Intermediate lifestyles", 
+                                                 "High-density and high-rise flats",
+                                                 "Settled Asians",
+                                                 "Urban elites",
+                                                 "City vibe",
+                                                 "London life-cycle",
+                                                 "Multi-ethnic suburbs",
+                                                 "Ageing city fringe"))
+)
+
+  msoa_loac <- geog_lookup %>%
+    left_join(loac_df, by = c("OA11CD"= "oa_code")) %>%
+  group_by(supgrp_cd, supgrp_name, msoa.code) %>%
+  summarise(counts = n()) %>%
+  group_by(msoa.code) %>%
+  mutate(fract = counts/sum(counts)) %>%
+  arrange(-fract) %>%
+  slice(1) %>%
+  ungroup %>%
+  mutate(class2 = ifelse(fract<.5, "mixed type", supgrp_name)) 
+
+msoa_loac <- msoa_loac %>%
+  left_join(., msoa_loac %>%
+  group_by(class2) %>%
+  summarise(class_counts = n())) %>%
+  mutate(class3 = ifelse(class_counts <30, "other", class2))
+  
+}
+
+#table(msoa_loac$class3)
+#table(msoa_class$SOAC11NM)
+#table(msoa_class$class2)
+#table(msoa_class$class3)
+
+```
+load deprivation data
+
+```{r, results='hide',echo = FALSE}
+deprivation_df <- read_excel(file.path(data_folder, "File_1_-_IMD2019_Index_of_Multiple_Deprivation.xlsx"),  
+                             sheet = "IMD2019",
+                   .name_repair = "universal")  %>%
+  set_names(., nm = tolower(names(.))) %>%
+  select(lsoa.code = "lsoa.code..2011.", imd_rank = "index.of.multiple.deprivation..imd..rank")
+
+
+```
+
+
+laod population estimates
+
+```{r, results='hide',echo = FALSE}
+#This chunk is used to load the population data for normalising the case numbers to per 100k population
+
+
+#load data and make lower case headings with spaces as periods
+pop_estimates_df <- read_excel(file.path(path = data_folder,"SAPE22DT4-mid-2019-msoa-syoa-estimates-unformatted.xlsx"), 
+                   sheet = "Mid-2019 Persons",
+                   skip = 3,
+                   .name_repair = "universal")  %>%
+  set_names(., nm = tolower(names(.)))
+
+
+
+```
+
+
+## Load the MSOA case count data
+
+This chunk loads the data and ensures that all msoa have all time periods. empty time periods are assumed to have 0 new cases in that week.
+
+It also adds the population estimates from 2019 to make case rates by 100k persons
+
+A new variable is created which is the case data detrended
+
+```{r, results='hide',echo = FALSE}
+
+{
+covid_msoa_time <- read_csv(file.path(data_folder, "covid_uk_msoa_07202021.csv")) %>%
+  select(-X1) %>%
+  arrange(date) %>%
+  rename(rolling_sum = newCasesBySpecimenDateRollingSum,
+         msoa.code = areaCode) %>%
+  group_by(msoa.code) %>%
+  mutate(current_cases =lag(rolling_sum) ) %>%
+  ungroup %>%
+  filter(date> ymd("2020-05-01"))
+
+covid_msoa_time <- expand_grid(date = unique(covid_msoa_time$date), msoa.code = unique(covid_msoa_time$msoa.code)) %>%
+  left_join(covid_msoa_time) %>%
+  mutate(rolling_sum = ifelse(is.na(rolling_sum), 0, rolling_sum))%>%
+  #add in population data
+  left_join(pop_estimates_df %>% select(msoa.code, pop= all.ages)) %>%
+  mutate(case_rate = (rolling_sum/pop)*1e5) %>%
+  group_by(date) %>%
+  mutate(rolling_centered = rolling_sum-mean(rolling_sum),
+         case_rate_centered = case_rate-mean(case_rate)) %>%
+  ungroup 
+}
+
+
+```
+
+Whilst there is a clear relationship between case_rate and rolling sum, it is heteroscedastic. 
+```{r}
+covid_msoa_time %>%
+  ggplot(aes(x = rolling_sum, y = case_rate)) + geom_point()
+
+```
+
+# check case rate timeseries
+
+```{r}
+
+
+covid_msoa_time %>%
+  pivot_longer(cols = c(case_rate, case_rate_centered)) %>%
+  ggplot(aes(x = date, y = value, group = msoa.code)) +geom_line(alpha = 0.01) +
+  facet_wrap(~name)
+
+```
+# Distributions
+
+Centering the case rate about the mean for that week across all msoa removes the skew, showing that the data is normally distributed about the weekly mean
+
+```{r}
+
+covid_msoa_time %>%
+  pivot_longer(cols = c(case_rate, case_rate_centered)) %>%
+  #  filter(name != "case_rate") %>%
+  ggplot(aes(x = value)) +geom_density() +
+    facet_wrap(~name,scales = "free_x")
+
+```
+
+
+# Explore correlations
+
+As case rate is skewed pearsons cannot be used, kendall is used instead.
+
+Looking at the results shows that the centered data has much lower correlation and also a larger spread.
+
+```{r}
+
+case_rate_cor <- create_cor(covid_msoa_time = covid_msoa_time, target_var = case_rate,  method = "kendall")
+case_rate_centered_cor <- create_cor(covid_msoa_time = covid_msoa_time, target_var = case_rate_centered,  method = "kendall")
+
+
+list(case_rate_cor, case_rate_centered_cor) %>%
+  map_df(~{
+    .x$percentiles %>%
+  filter(percentile>0.025 & percentile<0.975) %>%
+  arrange(value) %>%
+  slice(1, n())
+  }) %>%
+  mutate(type = c("case_rate", "case_rate", "centered", "centered"))
+
+
+
+```
+
+# Visualising correlations
+
+Althought the plots are not that great, they show that there are more obvious clusters in the centered data
+```{r}
+ggcorrplot(case_rate_cor$cor_mat, hc.order = TRUE) + theme_void()
+
+```
+
+```{r}
+ggcorrplot(case_rate_centered_cor$cor_mat, hc.order = TRUE)  + theme_void()
+```
+
+
+# tSNE embeddings    
+
+mapping resident classes and deprivation over a tsne embedding of the time series. reveals that there is a relationship with both. 
+
+```{r}
+
+
+  test <-covid_msoa_time %>%
+select(msoa.code, date, rolling_centered) %>%
+  pivot_wider(., values_from = rolling_centered, names_from = date) 
+
+set.seed(65)
+test2 <- test %>%
+  select(-msoa.code) %>%
+  Rtsne(theta = 0.1)
+
+
+test3 <- test %>% select(msoa.code) %>%
+  mutate(d1 = test2$Y[,1],
+         d2 = test2$Y[,2])
+
+test3 %>%
+  left_join(msoa_loac) %>%
+  filter(class3 !="mixed type") %>%
+  ggplot(aes(x = d1, y = d2, colour = class3)) + geom_point() +
+  scale_color_brewer(type = "qual")
+
+
+
+ 
+
+```
+
+```{r}
+dep2 <- deprivation_df %>%
+  left_join(  geog_lookup %>%
+  select(lsoa.code = LSOA11CD, msoa.code) %>%
+    distinct()) %>%
+  group_by(msoa.code) %>%
+  summarise(imd_rank = mean(imd_rank)) %>%
+  mutate(imd_rank_msoa = rank(imd_rank))
+
+test3 %>%
+  left_join(dep2) %>%
+  ggplot(aes(x = d1, y = d2, colour = imd_rank_msoa)) + geom_point() +
+  scale_color_viridis_c()
+
+```
+
+
+
+```{r}
+
+
+new_tax_df <- read_excel(file.path(data_folder, "world_points_of_interest_premium_v6_6_0_Taxonomy.xlsx")) %>%
+  rename(new_tax = ...9) %>%
+  group_by(new_tax) %>%
+  summarise(counts = n()) %>%
+  arrange(-counts)
+
+
+
+```
+
