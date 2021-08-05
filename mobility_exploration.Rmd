@@ -1,0 +1,49 @@
+---
+title: "mobility data exploration"
+author: "Jonathan Bourne"
+date: "05/08/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r}
+
+packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne", "zoo")
+
+new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+sapply(packages, library, character.only = TRUE)
+
+library(ukcovid19)
+
+base_folder <- file.path("/home/jonno", "COVID_project")
+data_folder <- file.path(base_folder, "COVID_project_data")
+mobility_folder <- file.path(data_folder, "data")
+```
+
+
+
+```{r}
+
+mobility_rds <- file.path(mobility_folder, "mobility_data_compressed.rds")
+
+if(file.exists(mobility_rds)){
+  
+  mobility_data <- read_rds(file.path(mobility_folder, "mobility_data_compressed.rds"))
+  
+} else{
+  
+ mobility_data <- read_csv(file.path(mobility_folder, "signals_set_2.csv"))
+
+write_rds(test, file = file.path(mobility_folder, "mobility_data_compressed.rds"))
+
+  
+}
+
+
+```
+

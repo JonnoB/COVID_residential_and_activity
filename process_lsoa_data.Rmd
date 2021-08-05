@@ -109,81 +109,22 @@ test %>%
 
 ggcorrplot(cor_mat, hc.order = TRUE)
 
-library(Rtsne)
-
-tsne_mat <-covid_msoa_time %>%
-select(areaCode, date, rolling_sum) %>%
-  pivot_wider(., values_from = rolling_sum, names_from = date) %>%
-  select(-areaCode) %>%
-  Rtsne()
-
-row_fract<- rowSums(is.na(tsne_mat))/ncol(tsne_mat) 
-col_fract<- colSums(is.na(tsne_mat))/nrow(tsne_mat) 
-
-min(row_fract)
-min(col_fract)
-
-
-tsne_mat %>%
-  select((1:ncol(.))[col_fract>0.8])
 
 ```
 
-```{r}
-library(ukcovid19)
-
-https://api.coronavirus.data.gov.uk/v2/data?areaType=msoa&areaCode=E09000003&metric=newCasesBySpecimenDateRollingRate&format=csv
-
-query_filters <- c(
-      'areaType=utla',
-"areaCode=E09000003"
-)
-
-cases_and_deaths = list(
-  date = "date",
-  areaName = "areaName",
-  areaType = "areaType",
-  areaCode = "areaCode",
-  newCasesByPublishDate = "newCasesBySpecimenDateRollingRate"
-)
-
-
-data <- get_data(
-  filters = query_filters, 
-  structure = cases_and_deaths
-)
-
-
-AREA_TYPE = "nation"
-
-AREA_NAME = "england"
-
-
-endpoint <- "https://api.coronavirus.data.gov.uk/v1/data"
-
-
-# Create filters:
-
-filters <- c(
-
-  sprintf("areaType=%s", AREA_TYPE),
-
-  sprintf("areaName=%s", AREA_NAME)
-
-)
-
-```
 
 #lsoa msoa lookup
 
 ```{r}
 geog_lookup <- read_csv(file.path(data_folder, "Output_Area_to_LSOA_to_MSOA_to_Local_Authority_District_(December_2017)_Lookup_with_Area_Classifications_in_Great_Britain.csv")) %>%
-  filter(RGN11NM == "London")
+  filter(RGN11NM == "London") %>%
+  rename(msoa.code = MSOA11CD,
+         lsoa.code = LSOA11CD)
 
 msoa_class <- geog_lookup %>%
-  group_by(SOAC11CD, SOAC11NM, MSOA11CD) %>%
+  group_by(SOAC11CD, SOAC11NM, msoa.code) %>%
   summarise(counts = n()) %>%
-  group_by(MSOA11CD) %>%
+  group_by(msoa.code) %>%
   mutate(fract = counts/sum(counts)) %>%
   arrange(-fract) %>%
   slice(1) %>%
@@ -289,12 +230,24 @@ The resulting dataset includes only complete cases, as such it is only the data 
 
 ```{r}
 
-residential_lsoa_df <- age_df %>%
-  select(lsoa.code, fract_older) %>%
+#aggregate to msoa level using population weighted means
+residential_msoa_df <- age_df %>%
+  select(lsoa.code, fract_older, pop = total) %>%
   left_join(., air_pollution_df, by = c("lsoa.code" ="lsoa11") ) %>%
   left_join(., deprivation_df, by = c("lsoa.code" )) %>%
-  filter(complete.cases(.))
+  filter(complete.cases(.))%>%
+  left_join(  geog_lookup %>%
+  select(lsoa.code, msoa.code) %>%
+    distinct()) %>%
+  filter(!is.na(msoa.code)) %>%
+  select(-lsoa.code) %>%
+  group_by(msoa.code) %>%
+  summarise(fract_older = weighted.mean(fract_older, w = pop),
+            pm10_mean = weighted.mean(pm10_mean, w = pop),
+            imd_rank = weighted.mean(imd_rank, w = pop))
 
+
+write_csv(residential_msoa_df, file = file.path(data_folder, "msoa_demographics.csv"))
 ```
 
 

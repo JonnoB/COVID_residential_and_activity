@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 ```{r, echo = FALSE}
 
-packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne")
+packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne", "zoo")
 
 new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
@@ -128,7 +128,7 @@ deprivation_df <- read_excel(file.path(data_folder, "File_1_-_IMD2019_Index_of_M
 ```
 
 
-laod population estimates
+load population estimates
 
 ```{r, results='hide',echo = FALSE}
 #This chunk is used to load the population data for normalising the case numbers to per 100k population
@@ -180,6 +180,9 @@ covid_msoa_time <- expand_grid(date = unique(covid_msoa_time$date), msoa.code = 
 }
 
 
+test <- covid_msoa_time %>%
+  filter(!complete.cases(.))
+
 ```
 
 Whilst there is a clear relationship between case_rate and rolling sum, it is heteroscedastic. 
@@ -225,16 +228,17 @@ Looking at the results shows that the centered data has much lower correlation a
 
 case_rate_cor <- create_cor(covid_msoa_time = covid_msoa_time, target_var = case_rate,  method = "kendall")
 case_rate_centered_cor <- create_cor(covid_msoa_time = covid_msoa_time, target_var = case_rate_centered,  method = "kendall")
+case_rate_centered_cor_pearson <- create_cor(covid_msoa_time = covid_msoa_time, target_var = case_rate_centered,  method = "pearson")
 
 
-list(case_rate_cor, case_rate_centered_cor) %>%
+list(case_rate_cor, case_rate_centered_cor, case_rate_centered_cor_pearson) %>%
   map_df(~{
     .x$percentiles %>%
   filter(percentile>0.025 & percentile<0.975) %>%
   arrange(value) %>%
   slice(1, n())
   }) %>%
-  mutate(type = c("case_rate", "case_rate", "centered", "centered"))
+  mutate(type = c("case_rate", "case_rate", "centered", "centered", "pearson", "pearson"))
 
 
 
@@ -249,7 +253,7 @@ ggcorrplot(case_rate_cor$cor_mat, hc.order = TRUE) + theme_void()
 ```
 
 ```{r}
-ggcorrplot(case_rate_centered_cor$cor_mat, hc.order = TRUE)  + theme_void()
+ggcorrplot(case_rate_centered_cor_pearson$cor_mat, hc.order = TRUE)  + theme_void()
 ```
 
 
@@ -261,6 +265,13 @@ mapping resident classes and deprivation over a tsne embedding of the time serie
 
 
   test <-covid_msoa_time %>%
+  group_by(msoa.code) %>%
+  #this little bit tries to leave only the signal ignoring the mean and the magnitude of the time series
+  mutate(rolling_centered_mean  = mean(rolling_centered),
+         rolling_centered_sd  = sd(rolling_centered),
+         rolling_centered = (rolling_centered-rolling_centered_mean)/rolling_centered_sd) %>%
+  ungroup %>%
+  #little bit ends here
 select(msoa.code, date, rolling_centered) %>%
   pivot_wider(., values_from = rolling_centered, names_from = date) 
 
@@ -275,7 +286,7 @@ test3 <- test %>% select(msoa.code) %>%
          d2 = test2$Y[,2])
 
 test3 %>%
-  left_join(msoa_loac) %>%
+  left_join(msoa_loac, by = "msoa.code") %>%
   filter(class3 !="mixed type") %>%
   ggplot(aes(x = d1, y = d2, colour = class3)) + geom_point() +
   scale_color_brewer(type = "qual")
@@ -283,6 +294,25 @@ test3 %>%
 
 
  
+covid_msoa_time %>%
+  group_by(msoa.code) %>%
+  #this little bit tries to leave only the signal ignoring the mean and the magnitude of the time series
+  mutate(rolling_centered_mean  = mean(rolling_centered),
+         rolling_centered_sd  = sd(rolling_centered),
+         rolling_centered = (rolling_centered-rolling_centered_mean)/rolling_centered_sd) %>%
+  ungroup %>%
+  ggplot(aes(x = date, y = rolling_centered, group = msoa.code)) +geom_line(alpha = 0.01) 
+
+# 
+#looks like several normally distributed densities, the different groups might be the observed corellation clusters, can check this 
+# covid_msoa_time %>%
+#   group_by(msoa.code) %>%
+#   #this little bit tries to leave only the signal ignoring the mean and the magnitude of the time series
+#   mutate(rolling_centered_mean  = mean(rolling_centered),
+#          rolling_centered_sd  = sd(rolling_centered),
+#          rolling_centered = (rolling_centered-rolling_centered_mean)/rolling_centered_sd) %>%
+#   ungroup %>%
+#   ggplot(aes(x = rolling_centered, group = msoa.code), alpha = 0.01) + geom_density()
 
 ```
 
@@ -303,6 +333,73 @@ test3 %>%
 ```
 
 
+more deprived areas have higher total case rates of Covid
+
+```{r}
+
+all_time_covid <-covid_msoa_time %>%
+  group_by(msoa.code) %>%
+  summarise(rolling_sum = sum(rolling_sum),
+            pop = first(pop)) %>%
+  mutate(total_case_rate = rolling_sum/pop) %>%
+  left_join(dep2) %>%
+  mutate(percentile = percent_rank(imd_rank),
+         target = case_when(
+           percentile<0.5~"most deprived",
+           percentile>0.5~"least deprived",
+           TRUE ~"middle"
+         ))
+  
+
+# 
+# all_time_covid %>%
+#   ggplot(aes(x = total_case_rate, colour = target)) + geom_density()
+
+all_time_covid %>%
+  ggplot(aes(x = imd_rank, y = total_case_rate, colour = target)) + geom_point()
+
+
+all_time_covid %>%
+  filter(target != "middle") %>%
+  ggplot(aes(x = target, y = total_case_rate, fill = target)) + geom_boxplot()
+
+
+
+
+t.test(all_time_covid$total_case_rate[all_time_covid$target=="most deprived"], all_time_covid$total_case_rate[all_time_covid$target=="least deprived"])
+
+```
+
+```{r}
+all_time_covid %>%
+  filter(target != "middle") %>%
+  ggplot(aes(x = target, y = total_case_rate, fill = target)) + geom_boxplot()
+
+```
+
+# Cross-corellation
+
+This chunk explores the lagged corellation between the 
+
+```{r}
+
+cor_mat <-covid_msoa_time %>%
+select(msoa.code, date, case_rate_centered) %>%
+  pivot_wider(., values_from = case_rate_centered, names_from = msoa.code) %>%
+  select(-date)
+
+
+test <-ccf(cor_mat[,1], cor_mat[,2], lag.max = 6)
+
+test <-acf(cor_mat[,1:2], lag.max = 6)
+
+
+
+test$acf
+
+```
+
+
 
 ```{r}
 
@@ -313,7 +410,35 @@ new_tax_df <- read_excel(file.path(data_folder, "world_points_of_interest_premiu
   summarise(counts = n()) %>%
   arrange(-counts)
 
+new_tax_df
 
+```
+
+
+#check mobility data
+
+```{r}
+test <- read_csv(file.path(data_folder, "data" ,"signals_set_2.csv"))
+```
+
+# hospitalisation  vs case lag
+```{r}
+
+cases_nation <- read_csv(file.path(data_folder, "cases_data_2021-Aug-03.csv")) %>%
+  mutate(mean_7 = rollmean(newCasesBySpecimenDate, k = 7, fill = NA),
+         type = "cases")
+
+hospital_nation <- read_csv(file.path(data_folder, "hospital_data_2021-Aug-03.csv")) %>%
+  mutate(mean_7 = rollmean(newAdmissions, k = 7, fill = NA),
+         type = "hospital")
+
+cases_nation %>%
+  bind_rows(hospital_nation) %>%
+  group_by(type) %>%
+  mutate(mean = (mean_7 -mean(mean_7, na.rm = T))/sd(mean_7, na.rm = T)) %>%
+  ungroup %>%
+  ggplot(aes(x = date, y = mean, colour = type)) + geom_line() +
+  labs(title = "Peak pattern between hospitalisations and cases", y = "rolling 7 day mean or normalised data")
 
 ```
 
