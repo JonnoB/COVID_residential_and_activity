@@ -7,7 +7,9 @@ editor_options:
   chunk_output_type: console
 ---
 
+It would be a good idea to know what fraction of total trips are represented by the dataset
 
+#setup
 
 ```{r}
 
@@ -50,6 +52,7 @@ write_rds(test, file = file.path(mobility_folder, "mobility_data_compressed.rds"
   
 }
 
+#test <- fread(file.path(mobility_folder, "signals_set_2.csv"))
 
 ```
 
@@ -91,7 +94,7 @@ pop_estimates_df <- read_excel(file.path(path = data_folder,"SAPE22DT4-mid-2019-
 
 #create and all london file
 
- all_london_shape <- MSOAshape %>% st_union %>% st_as_sf(.) %>%
+ #all_london_shape <- MSOAshape %>% st_union %>% st_as_sf(.) 
 
 
 ```
@@ -99,35 +102,45 @@ pop_estimates_df <- read_excel(file.path(path = data_folder,"SAPE22DT4-mid-2019-
 
 #load user ID data
 
-
+creates a user data frame that includes only people that live within the bounds of London
 ```{r}
 
+#this creates a data frame of London residents and thier MSOA
 {
-user_data <- read_csv(file.path(data_folder, "data", "users_set_1.csv")) %>%
+user_data <- fread(file.path(data_folder, "data", "users_set_1.csv"),
+                   na.strings = "None",
+                   colClasses = c("character", "numeric", "numeric", "numeric", "numeric", "factor")) %>%
   rename_with(., .fn = make.names) %>%
-  filter(is.visitor == "No") %>%
-  select(c(1:3)) %>%
-  mutate(residential.polygon.lat = as.numeric(residential.polygon.lat),
-         residential.polygon.lon = as.numeric(residential.polygon.lon),
-         userid = as.character(userid)) %>%
-    #remove all users with no known residence. 
-  #This is about 20k or 10%
-  filter(!is.na(residential.polygon.lat))
- 
-   test <- get_geographic_unit(data = user_data, 
+ filter(#is.visitor == "No",
+         !is.na(residential.polygon.lon)) %>%
+  select(c(1:3))
+
+   user_msoa_vect <- get_geographic_unit(data = user_data, 
                                shape_files = MSOAshape, 
                                unit_id = "msoa.code", 
                                position_names = c("residential.polygon.lat", "residential.polygon.lon")
    )
    
-   user_data <- user_data %>% mutate(msoa.code = test) %>%
+   #A large number of people have residence outside london despite it being stated they are inside London
+   #I conclude visitor does not mean visitor to London but visitor to the bounding box from which the data is drawn
+   user_data <- user_data %>% mutate(msoa.code = user_msoa_vect)  %>%
      filter(!is.na(msoa.code))
-   }
+
+}
+
+
+#every single msoa has a person   
+#minimum is 19 in the MSOA and max is 246
+unique(user_data$msoa.code) %>% length
+
+users_per_msoa <-user_data[, .(.N), by = msoa.code]
+
+write_csv(users_per_msoa, file.path(data_folder, "users_per_msoa.csv"))
 
 ```
 
 
-# map points to MSOA
+# load MSOA vect
 
 ```{r}
   
@@ -153,7 +166,7 @@ if(file.exists(msoa_vect_path)){
 #table(is.na(MSOA_vect))
 
 #619
-   
+
 ```
 
 
@@ -163,23 +176,31 @@ The missing data is all in the home counties
 
 ```{r}
 
- msoa_na_df <- mobility_data[is.na(MSOA_vect),]
+ msoa_na_df <- user_data[is.na(user_data$msoa.code),]# mobility_data[is.na(MSOA_vect),]
  
 write_rds(msoa_na_df, file.path(data_folder, "msoa_na_df.rds"))
 
+
+london_bbox <-st_bbox(all_london_shape) 
+
+
  sample_df <-   msoa_na_df[1:100000,] %>% data.frame() %>%
+   rename(lat = residential.polygon.lat, lon = residential.polygon.lon) %>%
+   filter(london_bbox[[1]]< lon, lon <london_bbox[[3]],
+          london_bbox[[2]]< lat, lat <london_bbox[[4]])%>%
       st_as_sf(., coords = c("lon", "lat"), crs = st_crs(MSOAshape)) 
  
  test_combine <- st_combine(MSOAshape)
+
  
    ggplot() +
-   geom_sf(all_london_shape, mapping = aes(geometry = x))+
+   geom_sf(all_london_shape, mapping = aes(geometry = x)) +
     geom_sf(data = sample_df,
             mapping = aes(geometry = geometry),
-              color = 'red', alpha = 0.02,
+              color = 'red', #alpha = 0.02,
     show.legend = 'point', inherit.aes = F) +
-     labs(title = "Traces without MSOA")
-  #   coord_sf(sample_df)
+     labs(title = "Traces without MSOA") 
+     coord_sf(sample_df)
  
    
    min(msoa_na_df$lon)
@@ -195,19 +216,77 @@ min(msoa_na_df$lat)
 
 
 
-#radius of gyration
+# Radius of gyration
+
+Creates the radius of gyration at MSOA level for people resident in London and only for trips within London
+The distribution of journey's is skewed as is shown by the difference in mean and median gyrations.
 
 ```{r}
 
+#load mobility data as data.table
+gyration <- fread(file.path(mobility_folder, 
+                                 "signals_set_2.csv"),
+               colClasses=c("userid"="character", date = "NULL", hour = "NULL", "lat"="numeric", "lon"="numeric"))[
+                 #remove users who are not London residents
+                 userid %in% user_data$userid,
+               ]
+
+
 #first remove duplicates by person day and MSOA.
+#It would be better to do this using the hexagons the Alexei has. as a lot of these could just be rounding errors.
+gyration <- unique(gyration)
+
+#for test purposes take only the first ten unique users
+#test2 <- test[userid %in% unique(test$userid)[1],]
 
 #calculate mean lat and long for that day
+gyration <-gyration[, `:=`(mean_lon = mean(lon), mean_lat = mean(lat)), by = .(userid)]
 
-#calculate haversine distance between mean point and all points for day and person
+#calculate haversine distance between mean point and all points per person for the whole time period.
+#The distance is measured in meters
 
-#calculate radius of gyration per person per day
+gyration <- gyration[, dist := distHaversine(p1 = gyration[,c("lon", "lat")], 
+                                       p2 = gyration[,c("mean_lon", "mean_lat")])]
 
-#calculate radius of gyration whole period by msoa
+#The gyration is calculated in this step
+gyration <- gyration[,.(gyration = sqrt(sum(dist^2))/.N), by = .(userid)]
+
+#remove all people with distance ==0
+gyration <- gyration[gyration !=0,]
+
+#join on MSOA data for users
+#there are a few gyration values that are NA. is this a problem?
+gyration <-gyration[data.table(user_data)[, .(userid, msoa.code)], on =.(userid)
+][, .(mean_gyration = mean(gyration, na.rm = TRUE), 
+      median_gyration = median(gyration, na.rm = TRUE),
+      counts = .N,
+      missing = sum(is.na(gyration))), 
+  by = .(msoa.code) ][, fraction_missing := missing/counts]
+
+#########
+##
+## Gyration Complete!
+##
+#########
+cor(gyration$mean_gyration, gyration$median_gyration)
+gyration %>%
+  left_join(msoa_demographic) %>%
+  ggplot(aes(x = mean_gyration, y = median_gyration, color = imd_rank)) + geom_point() +
+  scale_color_viridis_c() +
+  labs(title = "There is a pretty clear relationship between mean and median gyration, R=0.69")
+
+
+MSOAshape %>%
+  left_join(gyration) %>%
+  ggplot() +
+  geom_sf(aes(fill = mean_gyration)) + 
+  scale_fill_viridis_c()+
+  labs(title = "Median radius of gyration by msoa",
+       fill = "meters")
+
+gyration %>%
+  ggplot(aes(x = mean_gyration/median_gyration)) + geom_density()+
+  labs(title = "ratio of mean to median radius of gyration")
 
 ```
 
@@ -216,9 +295,43 @@ min(msoa_na_df$lat)
 
 
 ```{r}
+
+mobility_g <- create_mobility_graph(mobility_path =file.path(mobility_folder, "signals_set_2.csv"), 
+                              user_data, 
+                              pop_estimates_df, 
+                              MSOA_vect)
+
+
+mobility_g %>% write_graph(., file = file.path(data_folder, "data_graphs", "base_g.graphml"), format = "graphml")
+
+#mobility_g <- read_graph(file = file.path(data_folder, "data_graphs", "base_g.graphml"), format = "graphml")
+
+test <- as_data_frame(mobility_g) %>%
+  left_join(pop_estimates_df, by = c("from" = "msoa.code")) %>%
+  mutate(trips = weight*pop) %>%
+  filter(from =="E02000178", to != "E02000178")
+
+mobility_g %>%
+  as_data_frame() %>%
+write_csv(., file.path(data_folder, "base_g_edge_list.csv"))
+
+g_adj_df <- as_data_frame(mobility_g) %>%
+  pivot_wider(., names_from = "to", values_from = "weight", values_fill = 0 ) 
+
+
+test <- g_adj_df  %>%
+  select(-from) %>%
+  as.matrix() %>%Rtsne(. ) 
+
+as_tibble(test$Y) %>%
+  bind_cols(g_adj_df %>% select(msoa.code = from), .) %>%
+  left_join(msoa_demographic) %>%
+  ggplot(aes(x = V1, y = V2, color = imd_rank)) + geom_point()+
+  scale_color_viridis_c()
+
 #remove lat long
 test <-as.data.table(mobility_data %>% 
-                       select(userid, date)%>% 
+                       select(userid, date, hour)%>% 
                        mutate(userid = as.character(userid)))[,
                                                               msoa.code_trace := MSOA_vect]
 
@@ -241,9 +354,11 @@ test <- unique(test, by=c('userid', 'msoa.code_trace', 'date'))
 is_present_vect <- as.character(test$userid) %in% user_data$userid 
 
 #join on home MSOA 
-#removes the missing data to make joining easier
+#remove users that are not residents of london or do not have a known address.
+#This removal makes joining easier
 test <- test[is_present_vect,][user_data %>% select(userid, msoa.code_home = msoa.code) %>% as.data.table(), on ="userid"]
-#aggregate by home and distanation MSOA across whole time period
+#aggregate by home and destination MSOA across whole time period
+#can we use some time metric?
 test <- test[,.N, by =.(msoa.code_home, msoa.code_trace) ]%>%
   
   #add in the population for each msoa for normalisation
@@ -254,13 +369,12 @@ test <- test[,.N, by =.(msoa.code_home, msoa.code_trace) ]%>%
   ###
   ### I am removing na's as not all the msoa are present. THe whole shebang needs to be redon with all msoa
   ###
-  filter(!is.na(pop_trace) )%>%
+  filter(!is.na(pop_trace) ) %>%
   #divide all edge weights by the number of days and the number of people in the respective MSOA
   #for directed the edge is divided by the from MSOA
   #for undirected the edge is divided by the sum of the 'from' and the 'to' MSOA
   mutate(pop_tot = pop_home+pop_trace,
-         N_home = N/(pop_home/max(pop_home)),
-         N_tot = N*(pop_tot/max(pop_tot))) 
+         N_home = N/pop_home) 
 
 #create assymetric/directed adjacency matrix where each node is an MSOA
 #direction is travelled from home TO another location
@@ -272,7 +386,7 @@ directed_g <- test %>%
 #create undirected matrix that is the sum of the trips between MSOA
 undirected_g <- test %>%
   select(from = msoa.code_home, to = msoa.code_trace, weight = N_tot) %>% 
-  graph_from_data_frame(., directed = FALSE)
+  graph_from_data_frame(., directed = TRUE)
 
 
 #calculate betweeness centrality for both graphs plot colouring MSOA by centrality.
@@ -299,6 +413,76 @@ tibble(node = get.vertex.attribute(undirected_g) %>% unlist,
 #directed has a more skewed distribution of node centrality
 betweeness_scores_df %>%
   ggplot(aes(x = log10(betweeness), colour = type)) + geom_density()
+```
+
+#communities
+Using walktrap basically splits  the network into a NSEW compass points vibe
+
+```{r}
+test <-cluster_walktrap(mobility_g, steps = 4)
+
+
+
+#The indegree of the MSOA shows that the north circular shows up. Also the route to heathrow and Gatwick
+#This indicates that people in transport are getting registered
+MSOAshape %>%
+  left_join(as_data_frame(mobility_g, what = "vertices") %>%
+   as_tibble()  %>%
+   rename(msoa.code = name)%>%
+   mutate(community = membership(test),
+          degree = degree(mobility_g, mode = "in")) 
+   ) %>%
+  ggplot() +
+  geom_sf(aes(fill = degree)) + 
+  labs(title = "In degree of msoa",
+       fill = "k") +
+  scale_fill_viridis_c()
+ 
+
+```
+
+#SETSe
+
+```{r}
+
+undirected_mob_g <- mobility_g %>%
+  as.undirected(., mode = "collapse", edge.attr.comb = "sum")
+
+edge_weight <- get.edge.attribute(undirected_mob_g)$weight
+
+test <-  undirected_mob_g %>%
+  set.edge.attribute(., "k", value = (edge_weight-min(edge_weight))/(max(edge_weight)-min(edge_weight))) %>%
+  set.vertex.attribute(., "degree", value = degree(.)) %>%
+  prepare_edges(., ) %>%
+  prepare_continuous_force(., node_names = "name", force_var = "degree")
+
+ecount(test)/(vcount(test)*(vcount(test)-1)/2)
+
+embedded_data <- test %>%
+  setse_auto(., k = "k",
+             force = "degree",
+             sparse = TRUE,
+             verbose = TRUE)
+
+
+out <- create_node_edge_df(embedded_data , function_names = c("mean", "median", "sum"))
+
+out  %>% 
+  ggplot(aes(x = tension_median, y = elevation)) +geom_point()
+
+
+out %>%
+  ggplot(aes(x = tension_median, y = tension_mean)) + geom_point()
+
+MSOAshape %>%
+  left_join(out, by = c("msoa.code" ="node"))  %>%
+  ggplot() +
+  geom_sf(aes(fill = elevation)) + 
+  scale_fill_viridis_c()+
+  labs(title = "elevation msoa",
+       fill = "elevation")
+  
+
 ```
 
 
@@ -379,6 +563,153 @@ test <- MSOAshape %>%
 ```
 
 
+#load node2vec embeds
+
+```{r}
+n2v_df <- read_csv("/home/jonno/COVID_project/COVID_project_data/embedded_graphs/base_g.csv")
+
+test_rtsne <- n2v_df %>%
+  Rtsne()
+
+hclust_n2v <- hclust(dist(n2v_df))
+ 
+#tsne is not very succesful here
+ as_data_frame(mobility_g, what = "vertices") %>%
+   as_tibble() %>%
+   bind_cols(as_tibble(test_rtsne$Y)) %>%
+   rename(msoa.code = name) %>%
+   left_join(msoa_demographic) %>%
+   mutate(tree_clust = factor(cutree(hclust_n2v, k = 10))) %>%
+   ggplot(aes(x = V1, y = V2, colour = tree_clust)) + 
+   geom_point() 
+
+
+
+MSOAshape %>%
+  left_join(as_data_frame(mobility_g, what = "vertices") %>%
+   as_tibble()  %>%
+   rename(msoa.code = name)%>%
+   mutate(tree_clust = factor(cutree(hclust_n2v , k = 2))) 
+   ) %>%
+  ggplot() +
+  geom_sf(aes(fill = tree_clust)) + 
+  labs(title = "MSOA mobility graph emebdded into 128 dimensions using node2vec 
+       The results are then grouped using agglomerative clustering",
+       fill = "groups")
+   
+
+
+ tree_df <- as_data_frame(mobility_g, what = "vertices") %>%
+   as_tibble() %>%
+   bind_cols(as_tibble(test_rtsne$Y)) %>%
+   rename(msoa.code = name) %>%
+   left_join(msoa_demographic) %>%
+   mutate(tree_clust = factor(cutree(hclust_n2v , k = 5)),
+          tree_clust2 = factor(cutree(hclust_n2v , k = 2)))
+ 
+ tree_df %>%
+   ggplot(aes(x = tree_clust2, y = imd_rank, fill = tree_clust2)) +
+   geom_violin()
+
+ 
+ t.test(tree_df[tree_df$tree_clust2==1,'imd_rank'][[1]], tree_df[tree_df$tree_clust2==2,'imd_rank'][[1]])
+
+ 
+test <- 1:10000 %>%
+  map_df(~{
+    
+    set.seed(.x)
+    tibble(sample = .x, fraction = sum(sample(tree_df[tree_df$tree_clust2==1,'imd_rank'][[1]], 491, replace = T) > sample(tree_df[tree_df$tree_clust2==2,'imd_rank'][[1]], 491, replace = T)
+)/491 
+)
+    
+  })
+ 
+
+1-sum(test$fraction>0.5)/10000
+#This plot indicates that the movement patterns at network level are related to imd
+test %>%
+  ggplot(aes(x = fraction)) +
+  geom_density() +
+  labs(title = "Density plot of times that group A is more deprived than group B, when randomly paired 491 
+       times and averaged. 
+       Figure shows 10,000 repititions of the simulation group 'A' more deprived 99.93% of the time.")
+
+```
+
+
+#predicting case rate
+```{r}
+
+n2v_embeds <- covid_msoa_time %>%
+  group_by(msoa.code) %>%
+  summarise(rolling_sum = sum(rolling_sum),
+            current_cases = sum(current_cases, na.rm = T),
+            pop = first(pop)) %>%
+  mutate(case_rate = rolling_sum/pop) %>%
+  left_join( as_data_frame(read_graph( 
+    file = file.path(data_folder, "data_graphs", "base_g.graphml"), format = "graphml"),
+    what = "vertices") %>%
+      rename(msoa.code = name) %>%
+      bind_cols(read_csv("/home/jonno/COVID_project/COVID_project_data/embedded_graphs/base_g_30.csv") %>%
+                  rename(node_id = X1)) %>%
+      set_names(make.names(names(.))) 
+  )
+
+
+library(tidymodels)
+
+
+
+set.seed(345)
+folds <- n2v_embeds %>% select(case_rate, starts_with("X")) %>% 
+  vfold_cv(., v = 10)
+
+
+lm_mod <- linear_reg() %>% 
+  set_engine("lm")
+rf_mod <- rand_forest(mode = "regression", trees = 1000) %>%
+set_engine("ranger")
+
+
+lm_fit <- 
+  lm_mod %>% 
+  fit(case_rate ~ ., data = n2v_embeds %>% select(case_rate, starts_with("X")))
+
+
+rf_wf <- 
+  workflow() %>%
+  add_model(rf_mod) %>%
+  add_formula(case_rate ~ .)
+
+set.seed(456)
+rf_fit_rs <- 
+  rf_wf %>% 
+  fit_resamples(folds)
+
+collect_metrics(rf_fit_rs)
+
+rf_fit <- 
+  rf_mod %>% 
+  fit(case_rate ~ ., data = n2v_embeds %>% select(case_rate, starts_with("X")))
+
+preds <- predict(lm_fit, new_data = n2v_embeds) %>%
+  bind_cols(n2v_embeds)
+
+preds_rf <- predict(rf_fit, new_data = n2v_embeds) %>%
+  bind_cols(n2v_embeds)
+
+lm_fit
+
+tidy(lm_fit)
+
+summary(lm_mod$args)
+
+metrics(preds, truth = case_rate, estimate = .pred)
+
+```
+
+
 #users
 ```{r}
 
@@ -387,28 +718,43 @@ test <- read_csv(file.path(mobility_folder, "users_set_1.csv" ))
 ```
 
 
+#polycentric city
+
+
+This creates a data frame that can be saved as a csv then loaded into python for the 
+python script that calculates the polycentric radius of gyration
 ```{r}
+#load mobility data as data.table
 
-MSOAshape %>% left_join(covid_msoa_time %>%
-  filter(date <ymd("2020-06-07")) %>%
-  group_by(msoa.code) %>%
-  summarise(counts = sum(newCasesBySpecimenDateChange))) %>%
-  ggplot(.) +
-  geom_sf(mapping =aes(fill = counts))+
-  scale_fill_viridis_c()
+poly_df <- fread(file.path(mobility_folder, 
+                           "signals_set_2.csv"),
+                 colClasses=c("userid"="character", 
+                              date = "NULL", 
+                              hour = "NULL", 
+                              "lat"="numeric", 
+                              "lon"="numeric"))[,
+                                                msoa.code := MSOA_vect
+                              ][
+                                #remove users who are not London residents
+                                userid %in% user_data$userid,
+                              ] %>%
+  select(userid, msoa.code, lat, lon) %>%
+  mutate(time_spent = as.numeric(1.00))
 
 
 
-test <- MSOAshape %>% left_join(covid_msoa_time %>%
-  filter(date <ymd("2020-06-07"))) %>%
-  rename(counts = newCasesBySpecimenDateChange) %>%
-    mutate(counts = ifelse(is.na(counts), 0, counts)) %>%
-  group_by(msoa.code) %>%
-  summarise(counts = sum(counts)) %>%
-  left_join(dep2) 
+rm(MSOA_vect)
 
-t.test(test$counts[test$imd_rank<mean(test$imd_rank)],
-test$counts[test$imd_rank>=mean(test$imd_rank)])
+
+poly_df <- unique(poly_df)[!is.na(msoa.code),] %>%
+  mutate(loc = as.integer(as.factor(msoa.code))-1#,
+        # user = as.integer(as.factor(userid))-1
+         )
+
+poly_df[user_data, on = "userid", user  := as.integer(as.factor(msoa.code))]
+
+
+write_csv(poly_df, file.path(data_folder, "poly_df.csv"))
 
 ```
 
