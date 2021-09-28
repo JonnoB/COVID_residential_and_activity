@@ -14,7 +14,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 ```{r, echo = FALSE}
 
-packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne", "zoo")
+packages <- c("readxl", "readr", "tidyverse", "lubridate", "ggcorrplot", "Rtsne", "zoo", "infer")
 
 new.packages <- packages[!(packages %in% installed.packages()[,"Package"])]
 if(length(new.packages)) install.packages(new.packages)
@@ -117,7 +117,10 @@ msoa_loac <- msoa_loac %>%
 ```
 load deprivation data
 
+
 ```{r, results='hide',echo = FALSE}
+#high scores mean low deprivation
+#low scores mean high deprivation
 deprivation_df <- read_excel(file.path(data_folder, "File_1_-_IMD2019_Index_of_Multiple_Deprivation.xlsx"),  
                              sheet = "IMD2019",
                    .name_repair = "universal")  %>%
@@ -376,6 +379,128 @@ all_time_covid %>%
   ggplot(aes(x = target, y = total_case_rate, fill = target)) + geom_boxplot()
 
 ```
+
+#fractional cases
+
+This section creates a distribution of the fraction of total cases by week and separated by deprivation
+
+What we want to know is was there a difference in the times that more deprived got covid and was this difference ever reversed?
+
+
+```{r}
+
+all_time_covid <-covid_msoa_time %>%
+  left_join(dep2) %>%
+  mutate(percentile = percent_rank(imd_rank),
+         target = case_when(
+           percentile<0.5~"most deprived",
+           percentile>0.5~"least deprived",
+           TRUE ~"middle"
+         ),
+         deciles = ntile(imd_rank, n = 2) %>% as.factor) %>%
+  group_by(deciles, date) %>%
+  summarise(rolling_sum = sum(rolling_sum),
+            current_cases = sum(current_cases, na.rm= TRUE),
+            pop = sum(pop),
+            n = n()) %>%
+  mutate(total_rolling = sum(rolling_sum),
+         total_cases = sum(current_cases),
+         fract_rolling = rolling_sum/total_rolling,
+         fract_cases = current_cases/total_cases) %>%
+  group_by(date) %>%
+  mutate(rank = rank(rolling_sum)) %>%
+  ungroup
+
+
+
+all_time_covid %>%
+ggplot(aes(x = as.Date(date), y = fract_cases, colour = deciles)) + geom_line()
+
+```
+
+##Testing the temporal significance
+
+This section uses a t-test with boneferroni correction
+
+The resulting significant periods indicate different times of higher relative contagion from different time periods. The question is what is the reason behind these time periods?
+
+When it comes to wealthier areas is it related to school or university?
+
+```{r}
+all_time_covid2 <- covid_msoa_time %>%
+  left_join(dep2) %>%
+  mutate(percentile = percent_rank(imd_rank),
+         deciles = ntile(percentile, n = 2)) %>%
+  group_by(msoa.code) %>%
+  mutate(total_rolling = sum(rolling_sum),
+         fract_rolling = rolling_sum/total_rolling)
+
+
+#.x <- "2020-05-05" 
+time_diff_t_test_df  <-unique(all_time_covid2$date) %>%
+  map_df(~{
+    test <-all_time_covid2 %>%
+      filter(date == .x, deciles %in% c(1,2)) %>%
+  t_test(., formula = fract_rolling~deciles,
+         order = c(1,2),
+        # alternative = "less",
+        conf_level = 1-0.05/length(unique(all_time_covid2$date))
+         ) %>%
+      mutate(date = .x)
+    
+  })
+
+sig_dif <- time_diff_t_test_df %>%
+  filter(p_value<0.05/length(unique(all_time_covid2$date)))
+
+
+test2 <-all_time_covid%>%
+  mutate(deciles = make.names(deciles)) %>%
+  select(date, fract_rolling, deciles) %>%
+  pivot_wider(., names_from = deciles, values_from = fract_rolling) %>%
+  mutate(more_deprived_fract = X1>X2) %>%
+  filter(date %in% sig_dif$date) %>%
+  left_join(time_diff_t_test_df)
+
+
+ test2 %>%
+   ggplot(aes(X1, X2, colour = more_deprived_fract)) + geom_point()
+
+
+
+all_time_covid %>%
+  mutate(sig_dif = date %in% sig_dif$date) %>%
+ggplot(aes(x = as.Date(date), y = fract_cases, group = deciles, colour = sig_dif)) + 
+  geom_line() +
+  labs(title = "Time periods characterised by significant differences 
+       between most and least deprived areas",
+       color = "Significant difference")
+
+
+
+test <-all_time_covid %>%
+    mutate(deciles = make.names(deciles)) %>%
+  select(date, deciles, fract_cases) %>%
+  pivot_wider(., names_from = deciles, values_from = fract_cases) %>%
+  mutate(fract_cases_diff = X1-X2,
+         sig_dif = date %in% sig_dif$date) 
+test %>%
+ggplot(aes(x = as.Date(date), y = fract_cases_diff, group = 1, colour = sig_dif)) + 
+  geom_line() +
+  labs(title = "Time periods characterised by significant differences 
+       between most and least deprived areas",
+       color = "Significant difference",
+       y = "deprived - non-deprived",
+       x = "Date")
+  
+#Blue and above zero means more deprived areas contracted a significantly larger fraction of their total covid cases during this period than compare to the least deprived areas.
+
+#Blue line below zero means the least deprived areas contracted a significantly larger fraction of their covid cases than the most deprived areas in this period.
+
+#in other words above and below zero and below are opposites
+
+```
+
 
 # Cross-corellation
 

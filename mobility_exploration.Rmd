@@ -28,6 +28,9 @@ mobility_folder <- file.path(data_folder, "data")
 msoa_shapefile_path <- file.path(data_folder, "Middle_Layer_Super_Output_Areas_(December_2011)_Boundaries")
 
 
+list.files(file.path(base_folder, "COVID_residential_and_activity", "functions" ), pattern = ".R", full.names = T) %>%
+  walk(~source(.x))
+
 ```
 
 
@@ -721,11 +724,13 @@ test <- read_csv(file.path(mobility_folder, "users_set_1.csv" ))
 #polycentric city
 
 
+##create dataset
+
 This creates a data frame that can be saved as a csv then loaded into python for the 
 python script that calculates the polycentric radius of gyration
 ```{r}
 #load mobility data as data.table
-
+{
 poly_df <- fread(file.path(mobility_folder, 
                            "signals_set_2.csv"),
                  colClasses=c("userid"="character", 
@@ -733,28 +738,62 @@ poly_df <- fread(file.path(mobility_folder,
                               hour = "NULL", 
                               "lat"="numeric", 
                               "lon"="numeric"))[,
-                                                msoa.code := MSOA_vect
+                                                loc := MSOA_vect
                               ][
                                 #remove users who are not London residents
                                 userid %in% user_data$userid,
-                              ] %>%
-  select(userid, msoa.code, lat, lon) %>%
-  mutate(time_spent = as.numeric(1.00))
-
+                              ][, c("userid", "loc", "lat", "lon")][, time_spent := 1]
 
 
 rm(MSOA_vect)
 
-
-poly_df <- unique(poly_df)[!is.na(msoa.code),] %>%
-  mutate(loc = as.integer(as.factor(msoa.code))-1#,
+poly_df <- unique(poly_df)[!is.na(loc),] %>%
+  mutate(loc = as.integer(as.factor(loc))-1#,
         # user = as.integer(as.factor(userid))-1
          )
 
-poly_df[user_data, on = "userid", user  := as.integer(as.factor(msoa.code))]
-
+poly_df[user_data, on = "userid", msoa.code  := i.msoa.code][, user := as.integer(as.factor(msoa.code))-1]
 
 write_csv(poly_df, file.path(data_folder, "poly_df.csv"))
+}
 
+poly_user_vect <- unique(poly_df$user)
+
+sum(unique(poly_df$userid) %in% user_data$userid)
+
+poly_df <- fread(file.path(data_folder, "poly_df.csv"))
+
+
+poly_2 <- poly_df[, .N, by = c("loc", "user")]
+
+poly_3 <- poly_2[,.N, by = "user"]
+
+
+sum(is.na(poly_df))
+
+sapply(poly_df, function(n) sum(is.na(n)))
+
+```
+
+##import csv
+
+Once the gyration has been made in python it can be re-imported here
+time taken with kmax = 6 is 21k seconds
+
+
+```{r}
+
+#this un
+user_msoa_df <- unique(poly_df[,c("user", "msoa.code")]) %>%
+  left_join(read_csv("/home/jonno/COVID_project/COVID_project_data/multi_gyration.csv"))
+
+
+MSOAshape %>%
+  left_join(user_msoa_df) %>%
+  ggplot() +
+  geom_sf(aes(fill = as.factor(k))) + 
+  labs(title = "Polycentric gyration",
+       fill = "k") 
+  
 ```
 
